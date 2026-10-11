@@ -1,0 +1,541 @@
+// =====================================================
+// 4-WHEEL LINE FOLLOWER
+// 8 IR SENSOR + TB6612FNG
+//
+// LEFT BUTTON  -> CALIBRATION
+// RIGHT BUTTON -> START RUN
+//
+// LEFT SIDE  = 2 MOTORS
+// RIGHT SIDE = 2 MOTORS
+// =====================================================
+
+
+// =====================================================
+// MOTOR DRIVER PINS - TB6612FNG
+// =====================================================
+
+#define PWMB 9
+#define PWMA 3
+
+#define BIN1 7                                                                                                 
+#define BIN2 8
+
+#define AIN1 5
+#define AIN2 4
+
+#define STDBY 6
+
+
+// =====================================================
+// PERIPHERALS
+// =====================================================
+
+#define led1 11
+#define led2 12
+
+#define Button1 2
+#define Button2 10
+
+
+// =====================================================
+// PID VARIABLES
+// =====================================================
+
+int P, D, I;
+int lastError;
+int PIDoutput;
+
+int error;
+
+int speedA;
+int speedB;
+
+int sensorCount;
+
+
+// =====================================================
+// SPEED SETTINGS
+// =====================================================
+
+int robotSpeed = 100;
+
+int forwardSpeed = 100;
+int backwardSpeed = 100;
+
+int calibrationSpeed = 100;
+
+int uturnSpeed = 105;
+
+
+// =====================================================
+// PID SETTINGS
+// =====================================================
+
+int kp = 30;
+int kd = 120;
+int ki = 0;
+
+
+// =====================================================
+// SENSOR VARIABLES
+// =====================================================
+
+bool lineFound = true;
+
+int weights[8] = {
+  -8, -4, -2, -1,
+   1,  2,  4,  8
+};
+
+
+// =====================================================
+// CALIBRATION VALUES
+// =====================================================
+
+int minimum[8] = {
+  1023, 1023, 1023, 1023,
+  1023, 1023, 1023, 1023
+};
+
+int maximum[8] = {
+  0, 0, 0, 0,
+  0, 0, 0, 0
+};
+
+
+int analog[8];
+int binary[8];
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+
+  // Motor pins
+  pinMode(STDBY, OUTPUT);
+
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  pinMode(PWMA, OUTPUT);
+  pinMode(PWMB, OUTPUT);
+
+
+  // LEDs
+  pinMode(led1, OUTPUT);
+  pinMode(led2, OUTPUT);
+
+
+  // Buttons
+  pinMode(Button1, INPUT_PULLUP);
+  pinMode(Button2, INPUT_PULLUP);
+
+
+  // Enable motor driver
+  digitalWrite(STDBY, HIGH);
+
+
+  // Make sure LEDs are OFF
+  digitalWrite(led1, LOW);
+  digitalWrite(led2, LOW);
+
+
+  // Make sure motors are stopped
+  motorControl(0, 0);
+
+
+  // =================================================
+  // WAIT FOR LEFT BUTTON
+  // =================================================
+
+  while (digitalRead(Button1) == HIGH) {
+    // Wait
+  }
+
+
+  delay(100);
+
+
+  // =================================================
+  // START CALIBRATION
+  // =================================================
+
+  digitalWrite(led1, HIGH);
+
+  delay(1000);
+
+
+  calibrate();
+
+
+  delay(100);
+
+
+  // Calibration finished
+  digitalWrite(led1, LOW);
+
+
+  // =================================================
+  // WAIT FOR RIGHT BUTTON
+  // =================================================
+
+  while (digitalRead(Button2) == HIGH) {
+    // Wait
+  }
+
+
+  delay(1000);
+
+
+  // =================================================
+  // START LINE FOLLOWING
+  // =================================================
+
+  digitalWrite(led2, HIGH);
+}
+
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+
+void loop() {
+
+  readSensors();
+
+
+  if (lineFound) {
+
+    move();
+
+  }
+
+  else {
+
+    if (error > 0) {
+
+      turnLeft();
+
+    }
+
+    else if (error < 0) {
+
+      turnRight();
+
+    }
+
+    else {
+
+      uTurn();
+    }
+  }
+}
+
+
+// =====================================================
+// READ IR SENSORS
+// =====================================================
+
+void readSensors() {
+
+  lineFound = false;
+
+
+  for (int i = 0; i < 8; i++) {
+
+    int rawValue = analogRead(i);
+
+
+    analog[i] = map(
+      rawValue,
+      minimum[i],
+      maximum[i],
+      0,
+      1000
+    );
+
+
+    analog[i] = constrain(
+      analog[i],
+      0,
+      1000
+    );
+
+
+    binary[i] = analog[i] > 500;
+
+
+    if (binary[i]) {
+
+      lineFound = true;
+    }
+  }
+}
+
+
+// =====================================================
+// PID LINE FOLLOWING
+// =====================================================
+
+void move() {
+
+  error = 0;
+
+  sensorCount = 0;
+
+
+  // Calculate position error
+
+  for (int i = 0; i < 8; i++) {
+
+    error += weights[i] * binary[i];
+
+    sensorCount += binary[i];
+  }
+
+
+  // Prevent division by zero
+
+  if (sensorCount > 0) {
+
+    error = error / sensorCount;
+  }
+
+
+  // =================================================
+  // PID
+  // =================================================
+
+  P = error;
+
+  I = I + error;
+
+  D = error - lastError;
+
+
+  PIDoutput =
+    (kp * P) +
+    (ki * I) +
+    (kd * D);
+
+
+  lastError = error;
+
+
+  // =================================================
+  // MOTOR SPEED
+  // =================================================
+
+  speedA = robotSpeed - PIDoutput;
+
+  speedB = robotSpeed + PIDoutput;
+
+
+  speedA = constrain(
+    speedA,
+    -255,
+    255
+  );
+
+
+  speedB = constrain(
+    speedB,
+    -255,
+    255
+  );
+
+
+  motorControl(
+    speedA,
+    speedB
+  );
+}
+
+
+// =====================================================
+// CALIBRATION
+// =====================================================
+//
+// LEFT SIDE  -> FORWARD
+// RIGHT SIDE -> BACKWARD
+//
+// Robot should rotate clockwise in place.
+// =====================================================
+
+void calibrate() {
+
+  for (int j = 0; j < 2000; j++) {
+
+
+    // Clockwise rotation
+
+    motorControl(
+      calibrationSpeed,
+      -calibrationSpeed
+    );
+
+
+    // Read all 8 sensors
+
+    for (int i = 0; i < 8; i++) {
+
+      int val = analogRead(i);
+
+
+      if (val < minimum[i]) {
+
+        minimum[i] = val;
+      }
+
+
+      if (val > maximum[i]) {
+
+        maximum[i] = val;
+      }
+    }
+  }
+
+
+  // Stop after calibration
+
+  motorControl(0, 0);
+}
+
+
+// =====================================================
+// MOTOR CONTROL
+// =====================================================
+//
+// speedA = LEFT SIDE
+// speedB = RIGHT SIDE
+//
+// IMPORTANT:
+// RIGHT SIDE POLARITY IS REVERSED.
+// This makes positive LEFT + positive RIGHT
+// physically move the robot forward.
+// =====================================================
+
+void motorControl(int speedA, int speedB) {
+
+
+  // =================================================
+  // LEFT SIDE
+  // =================================================
+
+  if (speedA > 0) {
+
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, LOW);
+
+    analogWrite(
+      PWMA,
+      speedA
+    );
+  }
+
+
+  else if (speedA < 0) {
+
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, HIGH);
+
+    analogWrite(
+      PWMA,
+      abs(speedA)
+    );
+  }
+
+
+  else {
+
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, HIGH);
+
+    analogWrite(PWMA, 0);
+  }
+
+
+  // =================================================
+  // RIGHT SIDE
+  // REVERSED POLARITY
+  // =================================================
+
+  if (speedB > 0) {
+
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, HIGH);
+
+    analogWrite(
+      PWMB,
+      speedB
+    );
+  }
+
+
+  else if (speedB < 0) {
+
+    digitalWrite(BIN1, HIGH);
+    digitalWrite(BIN2, LOW);
+
+    analogWrite(
+      PWMB,
+      abs(speedB)
+    );
+  }
+
+
+  else {
+
+    digitalWrite(BIN1, HIGH);
+    digitalWrite(BIN2, HIGH);
+
+    analogWrite(PWMB, 0);
+  }
+}
+
+
+// =====================================================
+// TURN LEFT
+// =====================================================
+
+void turnLeft() {
+
+  motorControl(
+    -backwardSpeed,
+    forwardSpeed
+  );
+}
+
+
+// =====================================================
+// TURN RIGHT
+// =====================================================
+
+void turnRight() {
+
+  motorControl(
+    forwardSpeed,
+    -backwardSpeed
+  );
+}
+
+
+// =====================================================
+// U-TURN
+// =====================================================
+
+void uTurn() {
+
+  motorControl(
+    -uturnSpeed,
+    uturnSpeed
+  );
+}

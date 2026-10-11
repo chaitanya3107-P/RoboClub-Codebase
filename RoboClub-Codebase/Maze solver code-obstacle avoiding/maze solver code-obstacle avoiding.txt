@@ -1,0 +1,505 @@
+#include <Servo.h>
+
+// =====================================
+// TB6612FNG MOTOR DRIVER
+// =====================================
+
+#define PWMA 5
+#define AIN1 8
+#define AIN2 9
+
+#define PWMB 6
+#define BIN1 10
+#define BIN2 11
+
+#define STBY 13
+
+// =====================================
+// HC-SR04 ULTRASONIC
+// Mounted on Servo
+// =====================================
+
+#define TRIG_PIN 7
+#define ECHO_PIN 4
+
+// =====================================
+// SERVO
+// =====================================
+
+#define SERVO_PIN 3
+
+Servo scannerServo;
+
+// =====================================
+// SPEED & THRESHOLDS
+// =====================================
+
+int motorSpeed = 90;   // forward/backward speed
+int turnSpeed  = 80;   // turning speed (slower for accuracy)
+
+const int OBSTACLE_DISTANCE = 25;
+const int MAX_DISTANCE = 400;
+
+// =====================================
+// SERVO POSITIONS
+// =====================================
+
+const int SERVO_CENTER = 90;
+const int SERVO_LEFT   = 150;
+const int SERVO_RIGHT  = 30;
+
+// =====================================
+// MOVEMENT TIMING
+// =====================================
+
+const int TURN_TIME = 750;
+const int SERVO_SETTLE_TIME = 350;
+
+// =====================================
+// MODE CONTROL (Rule 3.5)
+// Serial commands:
+//   'A' -> AUTONOMOUS mode
+//   'M' -> MANUAL mode
+//   'F'/'B'/'L'/'R'/'S' -> manual drive
+//   'X' -> mark finish reached / halt
+// =====================================
+
+bool autonomousMode = true;
+bool finished = false;
+
+// =====================================
+// ANTI-LOOP PROTECTION
+// =====================================
+
+int consecutiveTurns = 0;
+const int LOOP_ESCAPE_THRESHOLD = 6;
+bool lastTurnWasLeft = false;
+
+// =====================================
+// FUNCTION PROTOTYPES
+// =====================================
+
+int readUltrasonic();
+int getAverageDistance();
+
+void runAutoMaze();
+void handleSerialCommands();
+
+void moveForward();
+void moveBackward();
+
+void turnLeft();
+void turnRight();
+
+void stopMotors();
+
+
+// =====================================
+// SETUP
+// =====================================
+
+void setup() {
+
+  pinMode(PWMA, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+
+  pinMode(PWMB, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  pinMode(STBY, OUTPUT);
+  digitalWrite(STBY, HIGH);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  scannerServo.attach(SERVO_PIN);
+  scannerServo.write(SERVO_CENTER);
+
+  Serial.begin(9600);
+  Serial.println(F("===================================="));
+  Serial.println(F(" MAZE SOLVER BOOTED"));
+  Serial.println(F(" Send 'A' = autonomous, 'M' = manual"));
+  Serial.println(F("===================================="));
+
+  stopMotors();
+  delay(1000);
+}
+
+
+// =====================================
+// MAIN LOOP
+// =====================================
+
+void loop() {
+
+  handleSerialCommands();
+
+  if (finished) {
+    stopMotors();
+    return;
+  }
+
+  if (autonomousMode) {
+    runAutoMaze();
+  }
+}
+
+
+// =====================================
+// SERIAL COMMAND HANDLER
+// =====================================
+
+void handleSerialCommands() {
+
+  if (!Serial.available()) {
+    return;
+  }
+
+  char cmd = Serial.read();
+
+  switch (cmd) {
+
+    case 'A':
+      autonomousMode = true;
+      finished = false;
+      consecutiveTurns = 0;
+      stopMotors();
+      Serial.println(F(">> MODE: AUTONOMOUS"));
+      break;
+
+    case 'M':
+      autonomousMode = false;
+      stopMotors();
+      Serial.println(F(">> MODE: MANUAL"));
+      break;
+
+    case 'X':
+      finished = true;
+      stopMotors();
+      Serial.println(F(">> FINISH marked. Send 'A' or 'M' to resume."));
+      break;
+
+    case 'F':
+      if (!autonomousMode) { moveForward(); Serial.println(F(">> MANUAL: forward")); }
+      break;
+
+    case 'B':
+      if (!autonomousMode) { moveBackward(); Serial.println(F(">> MANUAL: backward")); }
+      break;
+
+    case 'L':
+      if (!autonomousMode) { turnLeft(); Serial.println(F(">> MANUAL: left")); }
+      break;
+
+    case 'R':
+      if (!autonomousMode) { turnRight(); Serial.println(F(">> MANUAL: right")); }
+      break;
+
+    case 'S':
+      if (!autonomousMode) { stopMotors(); Serial.println(F(">> MANUAL: stop")); }
+      break;
+
+    default:
+      break;
+  }
+}
+
+
+// =====================================
+// AUTONOMOUS MAZE LOGIC
+// (now with full Serial telemetry)
+// =====================================
+
+void runAutoMaze() {
+
+  // ===================================
+  // STEP 1 — CHECK FRONT
+  // ===================================
+
+  scannerServo.write(SERVO_CENTER);
+  delay(50);
+
+  int frontDistance = readUltrasonic();
+
+  Serial.print(F("[t="));
+  Serial.print(millis());
+  Serial.print(F("ms] FRONT="));
+  Serial.print(frontDistance);
+  Serial.print(F("cm  (threshold="));
+  Serial.print(OBSTACLE_DISTANCE);
+  Serial.println(F("cm)"));
+
+  // ===================================
+  // FRONT CLEAR
+  // ===================================
+
+  if (frontDistance > OBSTACLE_DISTANCE) {
+
+    Serial.println(F("  -> DECISION: path clear, moving FORWARD"));
+
+    moveForward();
+    delay(40);
+
+    consecutiveTurns = 0;
+
+    return;
+  }
+
+  // ===================================
+  // FRONT BLOCKED — STOP AND SCAN
+  // ===================================
+
+  Serial.println(F("  -> FRONT BLOCKED. Stopping to scan L/R..."));
+
+  stopMotors();
+  delay(150);
+
+  scannerServo.write(SERVO_LEFT);
+  delay(SERVO_SETTLE_TIME);
+  int leftDistance = getAverageDistance();
+
+  scannerServo.write(SERVO_RIGHT);
+  delay(SERVO_SETTLE_TIME);
+  int rightDistance = getAverageDistance();
+
+  scannerServo.write(SERVO_CENTER);
+  delay(150);
+
+  Serial.print(F("  SCAN RESULTS -> LEFT="));
+  Serial.print(leftDistance);
+  Serial.print(F("cm  RIGHT="));
+  Serial.print(rightDistance);
+  Serial.println(F("cm"));
+
+  // ===================================
+  // DEAD-END CHECK
+  // ===================================
+
+  bool frontBlocked = (frontDistance <= OBSTACLE_DISTANCE);
+  bool leftBlocked  = (leftDistance  <= OBSTACLE_DISTANCE);
+  bool rightBlocked = (rightDistance <= OBSTACLE_DISTANCE);
+
+  Serial.print(F("  STATUS -> front:"));
+  Serial.print(frontBlocked ? F("BLOCKED") : F("open"));
+  Serial.print(F(" | left:"));
+  Serial.print(leftBlocked ? F("BLOCKED") : F("open"));
+  Serial.print(F(" | right:"));
+  Serial.println(rightBlocked ? F("BLOCKED") : F("open"));
+
+  if (frontBlocked && leftBlocked && rightBlocked) {
+
+    Serial.println(F("  -> DECISION: DEAD END. Executing 180 U-TURN"));
+
+    turnRight();
+    delay(TURN_TIME * 2);
+    stopMotors();
+    delay(100);
+
+    consecutiveTurns = 0;
+    return;
+  }
+
+  // ===================================
+  // LOOP-ESCAPE OVERRIDE
+  // ===================================
+
+  Serial.print(F("  consecutiveTurns="));
+  Serial.print(consecutiveTurns);
+  Serial.print(F(" / threshold="));
+  Serial.println(LOOP_ESCAPE_THRESHOLD);
+
+  if (consecutiveTurns >= LOOP_ESCAPE_THRESHOLD) {
+
+    Serial.println(F("  -> DECISION: possible LOOP detected. Reversing + opposite turn"));
+
+    moveBackward();
+    delay(TURN_TIME / 2);
+    stopMotors();
+    delay(100);
+
+    if (lastTurnWasLeft) {
+      turnRight();
+      lastTurnWasLeft = false;
+      Serial.println(F("     escape turn: RIGHT"));
+    } else {
+      turnLeft();
+      lastTurnWasLeft = true;
+      Serial.println(F("     escape turn: LEFT"));
+    }
+
+    delay(TURN_TIME);
+    stopMotors();
+    delay(100);
+
+    consecutiveTurns = 0;
+    return;
+  }
+
+  // ===================================
+  // CHOOSE LONGEST PATH
+  // ===================================
+
+  if (leftDistance > rightDistance) {
+
+    Serial.println(F("  -> DECISION: LEFT more open, turning LEFT"));
+
+    turnLeft();
+    delay(TURN_TIME);
+    stopMotors();
+    delay(100);
+
+    lastTurnWasLeft = true;
+
+  } else {
+
+    Serial.println(F("  -> DECISION: RIGHT more open (or equal), turning RIGHT"));
+
+    turnRight();
+    delay(TURN_TIME);
+    stopMotors();
+    delay(100);
+
+    lastTurnWasLeft = false;
+  }
+
+  consecutiveTurns++;
+}
+
+
+// =====================================
+// ULTRASONIC READING
+// =====================================
+
+int readUltrasonic() {
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 24000);
+
+  if (duration == 0) {
+    return MAX_DISTANCE;
+  }
+
+  int distance = duration / 58;
+
+  if (distance <= 0) {
+    return MAX_DISTANCE;
+  }
+
+  if (distance > MAX_DISTANCE) {
+    distance = MAX_DISTANCE;
+  }
+
+  return distance;
+}
+
+
+// =====================================
+// AVERAGE 3 ULTRASONIC READINGS
+// =====================================
+
+int getAverageDistance() {
+
+  const int SAMPLES = 3;
+  long total = 0;
+
+  for (int i = 0; i < SAMPLES; i++) {
+    total += readUltrasonic();
+    delay(30);
+  }
+
+  return total / SAMPLES;
+}
+
+
+// =====================================
+// MOVE FORWARD
+// =====================================
+
+void moveForward() {
+
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+
+  analogWrite(PWMA, motorSpeed);
+  analogWrite(PWMB, motorSpeed);
+}
+
+
+// =====================================
+// MOVE BACKWARD
+// =====================================
+
+void moveBackward() {
+
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, HIGH);
+
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, HIGH);
+
+  analogWrite(PWMA, motorSpeed);
+  analogWrite(PWMB, motorSpeed);
+}
+
+
+// =====================================
+// TURN LEFT
+// =====================================
+
+void turnLeft() {
+
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, HIGH);
+
+  digitalWrite(BIN1, HIGH);
+  digitalWrite(BIN2, LOW);
+
+  analogWrite(PWMA, turnSpeed);
+  analogWrite(PWMB, turnSpeed);
+}
+
+
+// =====================================
+// TURN RIGHT
+// =====================================
+
+void turnRight() {
+
+  digitalWrite(AIN1, HIGH);
+  digitalWrite(AIN2, LOW);
+
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, HIGH);
+
+  analogWrite(PWMA, turnSpeed);
+  analogWrite(PWMB, turnSpeed);
+}
+
+
+// =====================================
+// STOP MOTORS
+// =====================================
+
+void stopMotors() {
+
+  analogWrite(PWMA, 0);
+  analogWrite(PWMB, 0);
+
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, LOW);
+
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, LOW);
+}

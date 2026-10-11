@@ -1,0 +1,247 @@
+//================================================
+// RECEIVER PINS
+//================================================
+#define CH1 2       // Steering: Left / Right
+#define CH2 3       // Throttle: Forward / Backward
+
+//================================================
+// CYTRON MDD10A PINS
+//================================================
+#define PWM1 5      // Left motor
+#define DIR1 4
+
+#define PWM2 6      // Right motor
+#define DIR2 7
+
+//================================================
+// SPEED SETTINGS
+//================================================
+int currentSpeed1 = 0;
+int currentSpeed2 = 0;
+
+int targetSpeed1 = 0;
+int targetSpeed2 = 0;
+
+const int MAX_SPEED = 220;
+
+// Smaller = faster acceleration
+const int ACCEL_STEP = 8;
+
+// Acceleration update delay
+const int ACCEL_DELAY = 10;
+
+// Receiver center
+const int CENTER = 1500;
+
+// Deadband
+const int DEAD_BAND = 60;
+
+
+//================================================
+// SETUP
+//================================================
+void setup() {
+
+  Serial.begin(9600);
+
+  pinMode(CH1, INPUT);
+  pinMode(CH2, INPUT);
+
+  pinMode(PWM1, OUTPUT);
+  pinMode(DIR1, OUTPUT);
+
+  pinMode(PWM2, OUTPUT);
+  pinMode(DIR2, OUTPUT);
+
+  stopMotors();
+
+  Serial.println("===== SUMO ROBOT READY =====");
+}
+
+
+//================================================
+// MAIN LOOP
+//================================================
+void loop() {
+
+  int ch1 = pulseIn(CH1, HIGH, 30000);
+  int ch2 = pulseIn(CH2, HIGH, 30000);
+
+  //================================================
+  // FAILSAFE
+  //================================================
+  if (ch1 == 0 || ch2 == 0) {
+
+    targetSpeed1 = 0;
+    targetSpeed2 = 0;
+
+    rampSpeed();
+
+    Serial.println("SIGNAL LOST");
+
+    delay(20);
+    return;
+  }
+
+
+  //================================================
+  // CONVERT RECEIVER TO -255 TO +255
+  //================================================
+
+  int steering = map(ch1, 1000, 2000, -MAX_SPEED, MAX_SPEED);
+  int throttle = map(ch2, 1000, 2000, -MAX_SPEED, MAX_SPEED);
+
+  steering = constrain(steering, -MAX_SPEED, MAX_SPEED);
+  throttle = constrain(throttle, -MAX_SPEED, MAX_SPEED);
+
+
+  //================================================
+  // DEAD BAND
+  //================================================
+
+  if (abs(steering) < DEAD_BAND) {
+    steering = 0;
+  }
+
+  if (abs(throttle) < DEAD_BAND) {
+    throttle = 0;
+  }
+
+
+  //================================================
+  // DIFFERENTIAL / TANK MIXING
+  //================================================
+
+  targetSpeed1 = throttle + steering;
+  targetSpeed2 = throttle - steering;
+
+
+  targetSpeed1 = constrain(targetSpeed1, -MAX_SPEED, MAX_SPEED);
+  targetSpeed2 = constrain(targetSpeed2, -MAX_SPEED, MAX_SPEED);
+
+
+  //================================================
+  // RAMP SPEED
+  //================================================
+
+  rampSpeed();
+
+  delay(ACCEL_DELAY);
+}
+
+
+//================================================
+// RAMP SPEED
+//================================================
+void rampSpeed() {
+
+  // LEFT MOTOR
+  if (currentSpeed1 < targetSpeed1) {
+
+    currentSpeed1 += ACCEL_STEP;
+
+    if (currentSpeed1 > targetSpeed1)
+      currentSpeed1 = targetSpeed1;
+  }
+
+  else if (currentSpeed1 > targetSpeed1) {
+
+    currentSpeed1 -= ACCEL_STEP;
+
+    if (currentSpeed1 < targetSpeed1)
+      currentSpeed1 = targetSpeed1;
+  }
+
+
+  // RIGHT MOTOR
+  if (currentSpeed2 < targetSpeed2) {
+
+    currentSpeed2 += ACCEL_STEP;
+
+    if (currentSpeed2 > targetSpeed2)
+      currentSpeed2 = targetSpeed2;
+  }
+
+  else if (currentSpeed2 > targetSpeed2) {
+
+    currentSpeed2 -= ACCEL_STEP;
+
+    if (currentSpeed2 < targetSpeed2)
+      currentSpeed2 = targetSpeed2;
+  }
+
+
+  //================================================
+  // DRIVE MOTORS
+  //================================================
+
+  driveMotor1(currentSpeed1);
+  driveMotor2(currentSpeed2);
+}
+
+
+//================================================
+// LEFT MOTOR
+//================================================
+void driveMotor1(int speed) {
+
+  if (speed > 0) {
+
+    digitalWrite(DIR1, HIGH);
+    analogWrite(PWM1, speed);
+  }
+
+  else if (speed < 0) {
+
+    digitalWrite(DIR1, LOW);
+    analogWrite(PWM1, -speed);
+  }
+
+  else {
+
+    analogWrite(PWM1, 0);
+  }
+}
+
+
+//================================================
+// RIGHT MOTOR
+//================================================
+void driveMotor2(int speed) {
+
+  if (speed > 0) {
+
+    digitalWrite(DIR2, HIGH);
+    analogWrite(PWM2, speed);
+  }
+
+  else if (speed < 0) {
+
+    digitalWrite(DIR2, LOW);
+    analogWrite(PWM2, -speed);
+  }
+
+  else {
+
+    analogWrite(PWM2, 0);
+  }
+}
+
+
+//================================================
+// STOP MOTORS
+//================================================
+void stopMotors() {
+
+  currentSpeed1 = 0;
+  currentSpeed2 = 0;
+
+  targetSpeed1 = 0;
+  targetSpeed2 = 0;
+
+  analogWrite(PWM1, 0);
+  analogWrite(PWM2, 0);
+
+  digitalWrite(DIR1, LOW);
+  digitalWrite(DIR2, LOW);
+}
