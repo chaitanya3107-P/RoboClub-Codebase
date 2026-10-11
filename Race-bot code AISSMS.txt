@@ -1,0 +1,194 @@
+//=================================================
+// Arduino Nano + FS-iA6B + Cytron MDD10A
+// 4 Motors (Left pair + Right pair)  -- 65% SPEED CAP
+//
+// Nano is 5V logic, so the receiver connects directly (no divider).
+//=================================================
+
+// ---------- Pins (Arduino Nano) ----------
+#define CH1   2    // Steering  (INT0)
+#define CH2   3    // Throttle  (INT1)
+
+#define PWM1  9    // Left motors  PWM  (Timer1)
+#define DIR1  7    // Left motors  DIR
+
+#define PWM2  10   // Right motors PWM  (Timer1)
+#define DIR2  8    // Right motors DIR
+
+// ---------- RC / speed settings ----------
+#define RC_MIN      1000   // stick fully down/left (check serial printout)
+#define RC_MAX      2000   // stick fully up/right  (check serial printout)
+#define RC_CENTER   1500
+#define DEADBAND_US 30     // dead zone around center (microseconds)
+#define EDGE_US     100    // full speed reached this many us BEFORE stick end
+#define MIN_PWM     26     // minimum PWM once stick leaves dead zone (~65% of old 40)
+#define MAX_SPEED   166    // <-- 65% of 255 (0.65 x 255 = 165.75, rounded up)
+#define STEER_SCALE 1.0    // 1.0 = full steering, lower for gentler turns
+
+#define SIGNAL_TIMEOUT_MS 100   // stop motors if no valid pulse for this long
+#define PRINT_INTERVAL_MS 100   // serial print rate
+
+// ---------- Pulse capture (interrupt based) ----------
+volatile uint32_t ch1Start = 0, ch2Start = 0;
+volatile uint32_t ch1Width = 0, ch2Width = 0;
+volatile uint32_t ch1Last  = 0, ch2Last  = 0;   // millis() of last valid pulse
+
+void isrCh1()
+{
+  uint32_t now = micros();
+  if (digitalRead(CH1))
+  {
+    ch1Start = now;
+  }
+  else
+  {
+    uint32_t w = now - ch1Start;
+    if (w > 800 && w < 2200)
+    {
+      ch1Width = w;
+      ch1Last  = millis();
+    }
+  }
+}
+
+void isrCh2()
+{
+  uint32_t now = micros();
+  if (digitalRead(CH2))
+  {
+    ch2Start = now;
+  }
+  else
+  {
+    uint32_t w = now - ch2Start;
+    if (w > 800 && w < 2200)
+    {
+      ch2Width = w;
+      ch2Last  = millis();
+    }
+  }
+}
+
+// ---------- Convert pulse width (us) to -MAX_SPEED..+MAX_SPEED ----------
+int rcToSpeed(uint32_t v)
+{
+  int d = (int)v - RC_CENTER;
+  if (abs(d) < DEADBAND_US) return 0;
+
+  int range = ((d > 0) ? (RC_MAX - RC_CENTER) : (RC_CENTER - RC_MIN)) - EDGE_US;
+  if (range <= DEADBAND_US) range = DEADBAND_US + 1;   // safety
+
+  int s = map(abs(d), DEADBAND_US, range, MIN_PWM, MAX_SPEED);
+  s = constrain(s, 0, MAX_SPEED);
+
+  return (d > 0) ? s : -s;
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  pinMode(CH1, INPUT);
+  pinMode(CH2, INPUT);
+
+  pinMode(PWM1, OUTPUT);
+  pinMode(DIR1, OUTPUT);
+  pinMode(PWM2, OUTPUT);
+  pinMode(DIR2, OUTPUT);
+
+  // Timer1 (pins 9 & 10): prescaler 8 -> ~3.9 kHz PWM (quieter than 490 Hz)
+  TCCR1B = (TCCR1B & 0xF8) | 0x02;
+
+  stopMotors();
+
+  attachInterrupt(digitalPinToInterrupt(CH1), isrCh1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(CH2), isrCh2, CHANGE);
+}
+
+void loop()
+{
+  // Take a consistent snapshot of the shared values
+  noInterrupts();
+  uint32_t ch1 = ch1Width;
+  uint32_t ch2 = ch2Width;
+  uint32_t t1  = ch1Last;
+  uint32_t t2  = ch2Last;
+  interrupts();
+
+  uint32_t now = millis();
+  static uint32_t lastPrint = 0;
+  bool printNow = (now - lastPrint) >= PRINT_INTERVAL_MS;
+  if (printNow) lastPrint = now;
+
+  // Failsafe: no signal / transmitter off
+  if ((now - t1) > SIGNAL_TIMEOUT_MS || (now - t2) > SIGNAL_TIMEOUT_MS)
+  {
+    stopMotors();
+    if (printNow)
+    {
+      Serial.print("NO SIGNAL  (last CH1: ");
+      Serial.print(ch1);
+      Serial.print("  CH2: ");
+      Serial.print(ch2);
+      Serial.println(")");
+    }
+    delay(20);
+    return;
+  }
+
+  // Receiver values -> speed
+  int throttle = rcToSpeed(ch2);
+  int steering = (int)(rcToSpeed(ch1) * STEER_SCALE);
+
+  // Differential mixing
+  int leftSpeed  = throttle + steering;
+  int rightSpeed = throttle - steering;
+
+  // Normalize instead of hard clipping: keeps the turn ratio while
+  // the faster side runs at full MAX_SPEED
+  int m = max(abs(leftSpeed), abs(rightSpeed));
+  if (m > MAX_SPEED)
+  {
+    leftSpeed  = (long)leftSpeed  * MAX_SPEED / m;
+    rightSpeed = (long)rightSpeed * MAX_SPEED / m;
+  }
+
+  setMotor(PWM1, DIR1, leftSpeed);
+  setMotor(PWM2, DIR2, rightSpeed);
+
+  if (printNow)
+  {
+    Serial.print("CH1(steer): ");   Serial.print(ch1);
+    Serial.print("us  CH2(thr): "); Serial.print(ch2);
+    Serial.print("us  |  steer: "); Serial.print(steering);
+    Serial.print("  thr: ");        Serial.print(throttle);
+    Serial.print("  |  L: ");       Serial.print(leftSpeed);
+    Serial.print("  R: ");          Serial.println(rightSpeed);
+  }
+
+  delay(20);
+}
+
+void setMotor(int pwmPin, int dirPin, int speed)
+{
+  if (speed > 0)
+  {
+    digitalWrite(dirPin, HIGH);
+    analogWrite(pwmPin, speed);
+  }
+  else if (speed < 0)
+  {
+    digitalWrite(dirPin, LOW);
+    analogWrite(pwmPin, -speed);
+  }
+  else
+  {
+    analogWrite(pwmPin, 0);
+  }
+}
+
+void stopMotors()
+{
+  analogWrite(PWM1, 0);
+  analogWrite(PWM2, 0);
+}
